@@ -94,28 +94,44 @@
 
 - (void)startLocation:(BOOL)enableHighAccuracy
 {
-    if (![self isLocationServicesEnabled]) {
-        [self returnLocationError:PERMISSIONDENIED withMessage:@"Location services are not enabled."];
-        return;
-    }
-    if (![self isAuthorized]) {
+    if (![self isLocationServicesEnabled] || ![self isAuthorized]) {
         NSString* message = nil;
-        BOOL authStatusAvailable = [CLLocationManager respondsToSelector:@selector(authorizationStatus)]; // iOS 4.2+
-        if (authStatusAvailable) {
-            NSUInteger code = [CLLocationManager authorizationStatus];
-            if (code == kCLAuthorizationStatusNotDetermined) {
-                // could return POSITION_UNAVAILABLE but need to coordinate with other platforms
-                message = @"User undecided on application's use of location services.";
-            } else if (code == kCLAuthorizationStatusRestricted) {
-                message = @"Application's use of location services is restricted.";
+        
+        if (![self isLocationServicesEnabled]) {
+            message = @"Location services are not enabled.";
+        } else if (![self isAuthorized]) {
+            BOOL authStatusAvailable = [CLLocationManager respondsToSelector:@selector(authorizationStatus)]; // iOS 4.2+
+            if (authStatusAvailable) {
+                NSUInteger code = [CLLocationManager authorizationStatus];
+                if (code == kCLAuthorizationStatusNotDetermined) {
+                    // could return POSITION_UNAVAILABLE but need to coordinate with other platforms
+                    message = @"User undecided on application's use of location services.";
+                } else if (code == kCLAuthorizationStatusRestricted) {
+                    message = @"Application's use of location services is restricted.";
+                }
             }
         }
-        // PERMISSIONDENIED is only PositionError that makes sense when authorization denied
-        [self returnLocationError:PERMISSIONDENIED withMessage:message];
+        
+        @synchronized (self.locationData.locationCallbacks) {
+            if (self.locationData.locationCallbacks.count > 0) {
+                for (NSString* callbackId in self.locationData.locationCallbacks) {
+                    [self returnLocationError:callbackId withErrorCode:PERMISSIONDENIED withMessage:message];
+                }
+            
+                [self.locationData.locationCallbacks removeAllObjects];
+            }
+        }
+        
+        if (self.locationData.watchCallbacks.count > 0) {
+            for (NSString* timerId in self.locationData.watchCallbacks) {
+                [self returnLocationError:[self.locationData.watchCallbacks objectForKey:timerId]
+                            withErrorCode:PERMISSIONDENIED withMessage:message];
+            }
+        }
         
         return;
     }
-    
+
 #ifdef __IPHONE_8_0
     NSUInteger code = [CLLocationManager authorizationStatus];
     if (code == kCLAuthorizationStatusNotDetermined && ([self.locationManager respondsToSelector:@selector(requestAlwaysAuthorization)] || [self.locationManager respondsToSelector:@selector(requestWhenInUseAuthorization)])) { //iOS8+
@@ -307,7 +323,7 @@
     }
 }
 
-- (void)returnLocationError:(NSUInteger)errorCode withMessage:(NSString*)message
+- (void)returnLocationError:(NSString*)callbackId withErrorCode:(NSUInteger)errorCode withMessage:(NSString*)message
 {
     NSMutableDictionary* posError = [NSMutableDictionary dictionaryWithCapacity:2];
     
@@ -315,18 +331,7 @@
     [posError setObject:message ? message:@"" forKey:@"message"];
     CDVPluginResult* result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsDictionary:posError];
     
-    
-    @synchronized (self.locationData.locationCallbacks) {
-        for (NSString* callbackId in self.locationData.locationCallbacks) {
-            [self.commandDelegate sendPluginResult:result callbackId:callbackId];
-        }
-        
-        [self.locationData.locationCallbacks removeAllObjects];
-    }
-    
-    for (NSString* callbackId in self.locationData.watchCallbacks) {
-        [self.commandDelegate sendPluginResult:result callbackId:callbackId];
-    }
+    [self.commandDelegate sendPluginResult:result callbackId:callbackId];
 }
 
 - (void)locationManager:(CLLocationManager*)manager didFailWithError:(NSError*)error
@@ -343,7 +348,24 @@
         if (error.code == kCLErrorDenied) {
             positionError = PERMISSIONDENIED;
         }
-        [self returnLocationError:positionError withMessage:[error localizedDescription]];
+        
+        @synchronized (self.locationData.locationCallbacks) {
+            if (self.locationData.locationCallbacks.count > 0) {
+                for (NSString* callbackId in self.locationData.locationCallbacks) {
+                    [self returnLocationError:callbackId withErrorCode:positionError
+                              withMessage:[error localizedDescription]];
+                }
+            
+                [self.locationData.locationCallbacks removeAllObjects];
+            }
+        }
+        
+        if (self.locationData.watchCallbacks.count > 0) {
+            for (NSString* timerId in self.locationData.watchCallbacks) {
+                [self returnLocationError:[self.locationData.watchCallbacks objectForKey:timerId]
+                            withErrorCode:positionError withMessage:[error localizedDescription]];
+            }
+        }
     }
     
     if (error.code != kCLErrorLocationUnknown) {
